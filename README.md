@@ -11,6 +11,10 @@ This version enables:
 * Nullable attribute types
 * Removal of DebuggerStepThrough attribute
 
+Fork from the origional with some added 'hacks' to pull out `<xs:documentation>` tags and add them as code comments to the generated properties/classes.
+
+Also has build in loading of `<xs:include>` schemas
+
 ## Usage:
 ### Command line:
 xsd2.exe &lt;schema file&gt; [/o:&lt;output-directory&gt;] [/ns:&lt;namespace&gt;] /all

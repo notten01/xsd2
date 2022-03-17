@@ -1,8 +1,0 @@
-{
-  "profiles": {
-    "Xsd2": {
-      "commandName": "Project",
-      "commandLineArgs": "c:\\temp\\xsd\\EtherCATInfo.xsd /c -o=c:\\temp\\xsd"
-    }
-  }
-}
