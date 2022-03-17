@@ -2,19 +2,16 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Xml.Schema;
 using System.Xml.Serialization;
 using System.CodeDom;
 using System.CodeDom.Compiler;
 using System.ComponentModel;
-
 using Microsoft.CSharp;
 using System.IO;
 using System.Diagnostics;
-
+using System.Xml.Linq;
 using Microsoft.VisualBasic;
-
 using Xsd2.Capitalizers;
 
 namespace Xsd2
@@ -23,11 +20,12 @@ namespace Xsd2
     {
         public XsdCodeGeneratorOptions Options { get; set; }
         public Action<CodeNamespace, XmlSchema> OnValidateGeneratedCode { get; set; }
+        private const char DocMapSeparator = '.';
 
         XmlSchemas xsds = new XmlSchemas();
         HashSet<XmlSchema> importedSchemas = new HashSet<XmlSchema>();
 
-        public void Generate(IList<String> schemas, TextWriter output)
+        public void Generate(IList<string> schemas, TextWriter output)
         {
             if (Options == null)
             {
@@ -59,20 +57,21 @@ namespace Xsd2
                     }
                     else
                     {
-                        throw new InvalidOperationException(String.Format("Import '{0}' is not a file nor a directory.", import));
+                        throw new InvalidOperationException(string.Format("Import '{0}' is not a file nor a directory.", import));
                     }
                 }
             }
 
-            var inputs = new List<XmlSchema>();
+            var inputs = new List<(XmlSchema schema, XElement xml)>();
 
             foreach (var path in schemas)
             {
-                using (var r = File.OpenText(path))
+                string content = File.ReadAllText(path);
+                using (var r = new MemoryStream(Encoding.UTF8.GetBytes(content)))
                 {
                     XmlSchema xsd = XmlSchema.Read(r, null);
                     xsds.Add(xsd);
-                    inputs.Add(xsd);
+                    inputs.Add((xsd, XElement.Parse(content)));
                 }
             }
 
@@ -86,22 +85,22 @@ namespace Xsd2
             XmlCodeExporter codeExporter = new XmlCodeExporter(codeNamespace);
 
             List<XmlTypeMapping> maps = new List<XmlTypeMapping>();
-            foreach (var xsd in inputs)
-                foreach (XmlSchemaElement schemaElement in xsd.Elements.Values)
+            foreach (var input in inputs)
+                foreach (XmlSchemaElement schemaElement in input.schema.Elements.Values)
                 {
                     if (!ElementBelongsToImportedSchema(schemaElement))
                         maps.Add(schemaImporter.ImportTypeMapping(schemaElement.QualifiedName));
                 }
 
 
-            foreach (var xsd in inputs)
-                foreach (XmlSchemaComplexType schemaElement in xsd.Items.OfType<XmlSchemaComplexType>())
+            foreach (var input in inputs)
+                foreach (XmlSchemaComplexType schemaElement in input.schema.Items.OfType<XmlSchemaComplexType>())
                 {
                     maps.Add(schemaImporter.ImportSchemaType(schemaElement.QualifiedName));
                 }
 
-            foreach (var xsd in inputs)
-                foreach (XmlSchemaSimpleType schemaElement in xsd.Items.OfType<XmlSchemaSimpleType>())
+            foreach (var input in inputs)
+                foreach (XmlSchemaSimpleType schemaElement in input.schema.Items.OfType<XmlSchemaSimpleType>())
                 {
                     maps.Add(schemaImporter.ImportSchemaType(schemaElement.QualifiedName));
                 }
@@ -112,11 +111,17 @@ namespace Xsd2
             }
 
             foreach (var xsd in inputs)
-                ImproveCodeDom(codeNamespace, xsd);
+                ImproveCodeDom(codeNamespace, xsd.schema);
 
             if (OnValidateGeneratedCode != null)
                 foreach (var xsd in inputs)
-                    OnValidateGeneratedCode(codeNamespace, xsd);
+                    OnValidateGeneratedCode(codeNamespace, xsd.schema);
+
+            //add the documentation sections as code doc
+            foreach (var xsd in inputs)
+            {
+                AddDoc(codeNamespace, xsd.xml);
+            }
 
             // Check for invalid characters in identifiers
             CodeGenerator.ValidateIdentifiers(codeNamespace);
@@ -162,6 +167,82 @@ namespace Xsd2
             codeProvider.GenerateCodeFromNamespace(codeNamespace, output, codeGeneratorOptions);
         }
 
+        private Dictionary<string, string> CreateDocMap(XElement root)
+        {
+            Dictionary<string, string> docMap = new Dictionary<string, string>();
+            AppendDocMap(root, ref docMap, "");
+            return docMap;
+        }
+
+        private void ReplaceCommentsDoc(CodeCommentStatementCollection comments, string doc)
+        {
+            comments.Clear();
+            comments.Add(new CodeCommentStatement("<summary>", true));
+            comments.Add(new CodeCommentStatement(doc, true));
+            comments.Add(new CodeCommentStatement("</summary>", true));
+        }
+
+        private void AppendDocMap(XElement element, ref Dictionary<string, string> docMap, string path)
+        {
+            string nextPath = path;
+            string nextStep = path;
+            string namespaceName = element.Name.Namespace.NamespaceName;
+            XName annotationName = XName.Get("annotation", namespaceName);
+            XName documentationName = XName.Get("documentation", namespaceName);
+            XElement annotationElement = element.Element(annotationName);
+            XElement documentationElement = annotationElement?.Element(documentationName);
+            string itemName = element.Attribute("name")?.Value;
+
+            if (itemName != null)
+            {
+                nextStep = $"{nextStep}{itemName}";
+            }
+
+            if (documentationElement != null)
+            {
+                if (itemName == null)
+                {
+                    throw new ApplicationException($"Expected to find Name attribute on {element}");
+                }
+
+                nextPath = string.Join(DocMapSeparator.ToString(), nextPath, itemName).Trim(DocMapSeparator);
+
+                docMap.Add(nextPath, documentationElement.Value);
+            }
+
+            foreach (XElement child in element.Elements())
+            {
+                AppendDocMap(child, ref docMap, nextStep);
+            }
+        }
+
+        private void AddDoc(CodeNamespace space, XElement xml)
+        {
+            Dictionary<string, string> docMap = CreateDocMap(xml);
+
+            Debug.WriteLine($"Handling space {space.Name}");
+            foreach (CodeTypeDeclaration type in space.Types)
+            {
+                Debug.WriteLine($"Adding comment to type {type.Name}");
+                if (docMap.TryGetValue(type.Name, out string doc))
+                {
+                    ReplaceCommentsDoc(type.Comments, doc);
+                }
+                AddDocToChildren(type.Members, docMap, type.Name);
+            }
+        }
+
+        private void AddDocToChildren(CodeTypeMemberCollection collection, Dictionary<string, string> docMap, string parentPath)
+        {
+            foreach (CodeTypeMember codeTypeMember in collection)
+            {
+                if (docMap.TryGetValue(path, out string doc))
+                {
+                    ReplaceCommentsDoc(codeTypeMember.Comments, doc);
+                }
+            }
+        }
+
         private void ImportImportedSchema(string schemaFilePath)
         {
             using (var s = File.OpenRead(schemaFilePath))
@@ -190,10 +271,10 @@ namespace Xsd2
 
         /// <summary>
         /// Shamelessly taken from Xsd2Code project
-        /// </summary>       
+        /// </summary>
         private bool ContainsTypeName(XmlSchema schema, CodeTypeDeclaration type)
         {
-            //TODO: Does not work for combined anonymous types 
+            //TODO: Does not work for combined anonymous types
             //fallback: Check if the namespace attribute of the type equals the namespace of the file.
             //first, find the XmlType attribute.
             var ns = ExtractNamespace(type);
