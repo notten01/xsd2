@@ -70,9 +70,15 @@ namespace Xsd2
                 using (var r = new MemoryStream(Encoding.UTF8.GetBytes(content)))
                 {
                     XmlSchema xsd = XmlSchema.Read(r, null);
-                    xsds.Add(xsd);
-                    inputs.Add((xsd, XElement.Parse(content)));
+                    XElement rootElement = XElement.Parse(content);
+                    LoadIncludes(rootElement, path, inputs);
+                    inputs.Add((xsd, rootElement));
                 }
+            }
+
+            foreach ((XmlSchema schema, XElement xml) input in inputs)
+            {
+                xsds.Add(input.schema);
             }
 
             xsds.Compile(null, true);
@@ -167,6 +173,27 @@ namespace Xsd2
             codeProvider.GenerateCodeFromNamespace(codeNamespace, output, codeGeneratorOptions);
         }
 
+        private void LoadIncludes(XElement content, string path, List<(XmlSchema schema, XElement xml)> inputs)
+        {
+            XName includeElementName = XName.Get("include", content.Name.Namespace.NamespaceName);
+            string basePath = Path.GetDirectoryName(path);
+            foreach (XElement includeElement in content.Elements(includeElementName))
+            {
+                string includePath = includeElement.Attribute("schemaLocation")?.Value;
+                if (includePath != null)
+                {
+                    string includeContent = File.ReadAllText(Path.Combine(basePath, includePath));
+                    using (var r = new MemoryStream(Encoding.UTF8.GetBytes(includeContent)))
+                    {
+                        XmlSchema xsd = XmlSchema.Read(r, null);
+                        XElement rootElement = XElement.Parse(includeContent);
+                        LoadIncludes(rootElement, path, inputs);
+                        inputs.Add((xsd, rootElement));
+                    }
+                }
+            }
+        }
+
         private Dictionary<string, string> CreateDocMap(XElement root)
         {
             Dictionary<string, string> docMap = new Dictionary<string, string>();
@@ -236,6 +263,8 @@ namespace Xsd2
         {
             foreach (CodeTypeMember codeTypeMember in collection)
             {
+                string path = $"{parentPath}.{codeTypeMember.Name}".Trim(DocMapSeparator);
+                Debug.WriteLine($"Adding comment to type {codeTypeMember.Name}");
                 if (docMap.TryGetValue(path, out string doc))
                 {
                     ReplaceCommentsDoc(codeTypeMember.Comments, doc);
